@@ -113,7 +113,7 @@ export default function activate(pi: ExtensionAPI) {
 
 		ensureProxy(token, upstreamOrigin)
 			.then((baseUrl) => {
-				console.error(`[pi-zcode] transform proxy on ${baseUrl} -> ${upstreamOrigin}`);
+				dbg(`transform proxy on ${baseUrl} -> ${upstreamOrigin}`);
 				registerProviderFor(pi, baseUrl, token, models);
 			})
 			.catch(() => {
@@ -133,9 +133,13 @@ export default function activate(pi: ExtensionAPI) {
 		register();
 	});
 
-	if (registered === 0) {
-		console.error(
-			"[pi-zcode] no ZCode start-plan token found — log in to the ZCode desktop app once, then restart this session",
-		);
+	if (registered === 0 && process.env.PI_ZCODE_DEBUG) {
+		console.error("[pi-zcode] no ZCode start-plan token found — log in to the ZCode desktop app once, then restart this session");
 	}
+}
+
+// Anything written to pi's stderr during TUI init lands in the input box as
+// if typed; diagnostics stay silent unless PI_ZCODE_DEBUG is set.
+function dbg(message: string): void {
+	if (process.env.PI_ZCODE_DEBUG) console.error(`[pi-zcode] ${message}`);
 }
