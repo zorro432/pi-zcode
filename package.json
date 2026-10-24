@@ -1,0 +1,44 @@
+{
+  "name": "pi-zcode",
+  "version": "0.1.0",
+  "description": "ZCode (Z.ai) start-plan GLM models for pi",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "zcode",
+    "zai",
+    "glm"
+  ],
+  "files": [
+    "index.ts",
+    "proxy.ts",
+    "shared.ts",
+    "wire-preamble.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"tests/**/*.test.ts\""
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "undici": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.7.0"
+  }
+}
