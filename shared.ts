@@ -41,8 +41,6 @@ export interface ZcodeModelConfig {
 // Mirrors ZCode's createCredentialCipherProvider: `enc:v1:` + base64url(iv)
 // + "." + base64url(tag) + "." + base64url(ciphertext), AES-256-GCM on sha256(secret).
 
-export const CREDENTIAL_ENVELOPE_PREFIX = "enc:v1:";
-
 export function deriveCredentialSecret(input: {
 	envSecret?: string;
 	platform: string;
@@ -53,6 +51,8 @@ export function deriveCredentialSecret(input: {
 	const username = input.username || "unknown";
 	return `zcode-credential-fallback:${input.platform}:${input.homedir}:${username}`;
 }
+
+const CREDENTIAL_ENVELOPE_PREFIX = "enc:v1:";
 
 export function decryptCredentialEnvelope(envelope: string, secret: string): string {
 	if (!envelope.startsWith(CREDENTIAL_ENVELOPE_PREFIX)) return envelope;

@@ -124,3 +124,46 @@ test("proxy injects the ZCode system preamble into pi requests", async () => {
 		await new Promise<void>((resolve, reject) => upstream.close((err) => (err ? reject(err) : resolve())));
 	}
 });
+
+test("setToken rotates the upstream credential on the next request", async () => {
+	const authSeen: string[] = [];
+	const upstream = createServer((req: IncomingMessage, res) => {
+		req.on("data", () => {});
+		req.on("end", () => {
+			authSeen.push(String(req.headers["x-api-key"]));
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end("{}");
+		});
+	});
+	await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+	const port = (upstream.address() as { port: number }).port;
+
+	const proxy = await startZcodeTransformProxy({
+		upstreamOrigin: `http://127.0.0.1:${port}`,
+		appVersion: "3.16.3",
+		osCategory: "linux",
+		userAgent: newUserAgent("3.16.3"),
+		token: "jwt-old",
+	});
+
+	try {
+		const send = () => new Promise<number | undefined>((resolve, reject) => {
+			const req = httpRequest(`http://127.0.0.1:${proxy.port}/v1/messages`, {
+				method: "POST",
+				headers: { "content-type": "application/json", "authorization": "Bearer whatever" },
+			}, (res) => {
+				res.on("data", () => {});
+				res.on("end", () => resolve(res.statusCode));
+			});
+			req.on("error", reject);
+			req.end("{}");
+		});
+		await send();
+		proxy.setToken("jwt-new");
+		await send();
+		assert.deepEqual(authSeen, ["jwt-old", "jwt-new"], "upstream x-api-key must follow setToken");
+	} finally {
+		proxy.close();
+		await new Promise<void>((resolve, reject) => upstream.close((err) => (err ? reject(err) : resolve())));
+	}
+});

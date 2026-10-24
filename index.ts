@@ -82,11 +82,13 @@ export default function activate(pi: ExtensionAPI) {
 	let proxy: TransformProxy | null = null;
 
 	async function ensureProxy(token: string, upstreamOrigin: string): Promise<string> {
-		if (proxy) return `http://127.0.0.1:${proxy.port}`;
-		// HTTPS_PROXY here chains the upstream through mitmproxy when debugging:
-		// undici's fetch honors it per-request and won't loop (proxy binds 127.0.0.1
-		// and NO_PROXY keeps pi->proxy plain).
 		const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? undefined;
+		if (proxy) {
+			proxy.setToken(token);
+			return `http://127.0.0.1:${proxy.port}`;
+		}
+		// ZCODE_HTTPS_PROXY chains the upstream through a CONNECT proxy for debug
+		// capture; proxy binds loopback so pi->proxy stays plain.
 		proxy = await startZcodeTransformProxy({
 			upstreamOrigin,
 			appVersion: APP_VERSION,

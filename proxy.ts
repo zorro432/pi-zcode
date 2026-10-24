@@ -16,8 +16,8 @@ import { buildModelRequestHeaders, injectSystemPreamble, type HeaderSource, type
 
 export interface TransformProxy {
 	port: number;
-	/** Resolves when the server socket has fully closed. */
-	done: Promise<void>;
+	/** Point the upstream Authorization at a rotated JWT; takes effect next request. */
+	setToken(token: string): void;
 	close(): void;
 }
 
@@ -68,6 +68,10 @@ export async function startZcodeTransformProxy(input: HeaderSource & {
 	const debugProxy = process.env.ZCODE_HTTPS_PROXY;
 	const agent = secure && debugProxy ? new ConnectTunnelAgent(debugProxy) : undefined;
 
+	// Headers stamp per request; the token is read through this indirection so
+	// setToken() applies without rebuilding the proxy.
+	let currentToken = input.token;
+
 	const moduleDir = dirname(fileURLToPath(import.meta.url));
 	const preambleFile = join(moduleDir, "wire-preamble.json");
 	let preambleCache: SystemBlock[] | null = null;
@@ -83,14 +87,15 @@ export async function startZcodeTransformProxy(input: HeaderSource & {
 	}
 
 	const server = createServer((req, res) => {
-		handle(req, res).catch(() => {
-			if (!res.headersSent) res.writeHead(502);
-			res.end();
+		req.on("error", () => {});
+		const chunks: Buffer[] = [];
+		req.on("data", (c: Buffer) => chunks.push(c));
+		req.on("end", () => {
+			forward(req, res, chunks).catch(() => {
+				if (!res.headersSent) res.writeHead(502);
+				res.end();
+			});
 		});
-	});
-
-	const done = new Promise<void>((resolve) => {
-		server.on("close", () => resolve());
 	});
 
 	await new Promise<void>((resolve, reject) => {
@@ -105,62 +110,54 @@ export async function startZcodeTransformProxy(input: HeaderSource & {
 		agent?.destroy();
 	}
 
-	function relay(req: IncomingMessage, res: ServerResponse) {
-		const chunks: Buffer[] = [];
-		req.on("data", (c: Buffer) => chunks.push(c));
-		req.on("end", () => {
-			// The gateway's WAF scores the system prompt and flags requests whose
-			// system doesn't look like ZCode's own; the desktop app's real preamble
-			// (wire-preamble.json, captured via mitmproxy) clears it.
-			let body = Buffer.concat(chunks);
-			try {
-				const parsed = JSON.parse(body.toString("utf-8")) as { system?: unknown };
-				if (parsed && typeof parsed === "object" && "system" in parsed) {
-					parsed.system = injectSystemPreamble(parsed.system, loadPreamble());
-					body = Buffer.from(JSON.stringify(parsed), "utf-8");
-				}
-			} catch {
-				// Non-JSON body: forward as-is.
+	async function forward(req: IncomingMessage, res: ServerResponse, chunks: Buffer[]) {
+		// The gateway's WAF scores the system prompt and flags requests whose
+		// system doesn't look like ZCode's own; the desktop app's real preamble
+		// (wire-preamble.json, captured via mitmproxy) clears it.
+		let body = Buffer.concat(chunks);
+		try {
+			const parsed = JSON.parse(body.toString("utf-8")) as { system?: unknown };
+			if (parsed && typeof parsed === "object" && "system" in parsed) {
+				parsed.system = injectSystemPreamble(parsed.system, loadPreamble());
+				body = Buffer.from(JSON.stringify(parsed), "utf-8");
 			}
-			// pi appends ?beta=true and the /v1/messages path; the upstream origin
-			// already carries the plan route prefix (/api/v1/zcode-plan/anthropic).
-			const inPath = ((req.url ?? "/").split("?")[0] ?? "/");
-			const path = `${upstream.pathname.replace(/\/$/, "")}${inPath}${upstream.search}`;
-			// The app's set, in its captured order — no accept/accept-language/
-			// sec-fetch-mode/accept-encoding, Connection: close like the app.
-			const headers = Object.fromEntries(buildModelRequestHeaders(input)) as Record<string, string>;
-			headers["connection"] = "close";
-			if (body.length > 0) headers["content-length"] = String(body.length);
+		} catch {
+			// Non-JSON body: forward as-is.
+		}
+		// pi appends ?beta=true and the /v1/messages path; the upstream origin
+		// already carries the plan route prefix (/api/v1/zcode-plan/anthropic).
+		const inPath = ((req.url ?? "/").split("?")[0] ?? "/");
+		const path = `${upstream.pathname.replace(/\/$/, "")}${inPath}${upstream.search}`;
+		// The app's set, in its captured order — no accept/accept-language/
+		// sec-fetch-mode/accept-encoding, Connection: close like the app.
+		const headers = Object.fromEntries(buildModelRequestHeaders({ ...input, token: currentToken })) as Record<string, string>;
+		headers["connection"] = "close";
+		if (body.length > 0) headers["content-length"] = String(body.length);
 
-			const upstreamReq = (secure ? httpsRequest : httpRequest)({
-				hostname: upstream.hostname,
-				port: upstream.port || (secure ? 443 : 80),
-				path,
-				method: "POST",
-				headers,
-				...(agent ? { agent } : {}),
-			});
-			upstreamReq.on("response", (upRes) => {
-				const out: Record<string, string> = {};
-				for (const [n, v] of Object.entries(upRes.headers)) {
-					if (["transfer-encoding", "connection", "content-length"].includes(n)) continue;
-					if (typeof v === "string") out[n] = v;
-				}
-				res.writeHead(upRes.statusCode ?? 502, out);
-				upRes.pipe(res);
-			});
-			upstreamReq.on("error", () => {
-				if (!res.headersSent) res.writeHead(502);
-				res.end();
-			});
-			if (body.length > 0) upstreamReq.write(body);
-			upstreamReq.end();
+		const upstreamReq = (secure ? httpsRequest : httpRequest)({
+			hostname: upstream.hostname,
+			port: upstream.port || (secure ? 443 : 80),
+			path,
+			method: "POST",
+			headers,
+			...(agent ? { agent } : {}),
 		});
+		upstreamReq.on("response", (upRes) => {
+			const out: Record<string, string> = {};
+			for (const [n, v] of Object.entries(upRes.headers)) {
+				if (["transfer-encoding", "connection", "content-length"].includes(n)) continue;
+				if (typeof v === "string") out[n] = v;
+			}
+			res.writeHead(upRes.statusCode ?? 502, out);
+			upRes.pipe(res);
+		});
+		upstreamReq.on("error", () => {
+			if (!res.headersSent) res.writeHead(502);
+			res.end();
+		});
+		if (body.length > 0) upstreamReq.write(body);
+		upstreamReq.end();
 	}
 
-	async function handle(req: IncomingMessage, res: ServerResponse) {
-		relay(req, res);
-	}
-
-	return { port, done, close };
+	return { port, close, setToken: (token: string) => { currentToken = token; } };
 }
