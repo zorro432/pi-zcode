@@ -80,6 +80,13 @@ function resolveBaseUrl(config: ZcodeConfigFile | null): string {
 export default function activate(pi: ExtensionAPI) {
 	const sessionId = crypto.randomUUID();
 	let proxy: TransformProxy | null = null;
+	// Notices raised before a session context exists flush through ctx.ui.notify
+	// on session_start — console.error during TUI init hijacks the input box.
+	const pendingNotices: string[] = [];
+
+	function notice(message: string): void {
+		pendingNotices.push(message);
+	}
 
 	async function ensureProxy(token: string, upstreamOrigin: string): Promise<string> {
 		const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? undefined;
@@ -119,6 +126,7 @@ export default function activate(pi: ExtensionAPI) {
 			.catch(() => {
 				// No local proxy (port bind failure?) — direct may trip the WAF,
 				// but a broken provider beats a missing one.
+				notice("transform proxy unavailable, using direct endpoint (may hit the WAF)");
 				registerProviderFor(pi, upstreamOrigin, token, models);
 			});
 		return models.length;
@@ -128,13 +136,20 @@ export default function activate(pi: ExtensionAPI) {
 
 	process.on("exit", () => proxy?.close());
 
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event, ctx) => {
 		// ZCode rewrites these files on login/plan changes; re-read each session.
 		register();
+		for (const message of pendingNotices.splice(0)) {
+			try {
+				ctx.ui.notify(`[pi-zcode] ${message}`, "warning");
+			} catch {
+				console.error(`[pi-zcode] ${message}`);
+			}
+		}
 	});
 
-	if (registered === 0 && process.env.PI_ZCODE_DEBUG) {
-		console.error("[pi-zcode] no ZCode start-plan token found — log in to the ZCode desktop app once, then restart this session");
+	if (registered === 0) {
+		notice("no ZCode start-plan token found — log in to the ZCode desktop app once, then restart this session");
 	}
 }
 
