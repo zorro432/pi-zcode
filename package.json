@@ -2,6 +2,7 @@
   "name": "pi-zcode",
   "version": "0.1.0",
   "description": "ZCode (Z.ai) start-plan GLM models for pi",
+  "repository": "github:zorro432/pi-zcode",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -13,8 +14,10 @@
   ],
   "files": [
     "index.ts",
+    "data-files.ts",
     "proxy.ts",
     "shared.ts",
+    "usage.ts",
     "wire-preamble.json",
     "README.md",
     "LICENSE"

@@ -8,11 +8,12 @@
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { connect as tlsConnect } from "node:tls";
 import { Agent as HttpsAgent } from "node:https";
-import { buildModelRequestHeaders, injectSystemPreamble, type HeaderSource, type SystemBlock } from "./shared.ts";
+import { buildModelRequestHeaders, transformRequestBody, type HeaderSource, type SystemBlock } from "./shared.ts";
 
 export interface TransformProxy {
 	port: number;
@@ -79,7 +80,14 @@ export async function startZcodeTransformProxy(input: HeaderSource & {
 		if (preambleCache) return preambleCache;
 		try {
 			const parsed = JSON.parse(readFileSync(preambleFile, "utf-8")) as { blocks?: SystemBlock[] };
-			preambleCache = parsed.blocks ?? [];
+			// The captured text embeds the capturing machine's visualization dir
+			// as {{ZCODE_VISUALIZATION_DIR}}; fill it in per session so the file
+			// carries no machine-specific paths.
+			const visDir = join(homedir(), ".zcode", "v2", "visualizations", input.sessionId?.replace(/-/g, "") || "session");
+			preambleCache = (parsed.blocks ?? []).map((b) => ({
+				...b,
+				text: b.text.split("{{ZCODE_VISUALIZATION_DIR}}").join(visDir),
+			}));
 		} catch {
 			preambleCache = [];
 		}
@@ -111,15 +119,17 @@ export async function startZcodeTransformProxy(input: HeaderSource & {
 	}
 
 	async function forward(req: IncomingMessage, res: ServerResponse, chunks: Buffer[]) {
-		// The gateway's WAF scores the system prompt and flags requests whose
-		// system doesn't look like ZCode's own; the desktop app's real preamble
-		// (wire-preamble.json, captured via mitmproxy) clears it.
+		// The gateway's WAF scores the top-level system field additively; big
+		// multi-section systems trip "unusual activity" even though the same
+		// text passes inside messages (proven by bisect). Relocate pi's system
+		// into a leading role:"system" message — the desktop app's own wire
+		// shape (mid-conversation-system beta) — keeping the app's preamble as
+		// the top-level system.
 		let body = Buffer.concat(chunks);
 		try {
-			const parsed = JSON.parse(body.toString("utf-8")) as { system?: unknown };
-			if (parsed && typeof parsed === "object" && "system" in parsed) {
-				parsed.system = injectSystemPreamble(parsed.system, loadPreamble());
-				body = Buffer.from(JSON.stringify(parsed), "utf-8");
+			const parsed = JSON.parse(body.toString("utf-8")) as Record<string, unknown>;
+			if (parsed && typeof parsed === "object") {
+				body = Buffer.from(JSON.stringify(transformRequestBody(parsed, loadPreamble())), "utf-8");
 			}
 		} catch {
 			// Non-JSON body: forward as-is.

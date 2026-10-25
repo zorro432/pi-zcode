@@ -7,8 +7,12 @@ import {
 	decryptCredentialEnvelope,
 	deriveCredentialSecret,
 	newUserAgent,
+	normalizeOsCategory,
 	startPlanModelConfigs,
+	thinkingLevelMapFor,
+	transformRequestBody,
 	type HeaderSource,
+	type SystemBlock,
 	type ZcodeModelSpec,
 } from "../shared.ts";
 
@@ -56,7 +60,7 @@ test("secret derivation prefers env, falls back to platform string", () => {
 
 test("identity headers carry the captured wire shape", () => {
 	const token = "tok";
-	const headers = buildZcodeHeaders({ appVersion: "3.16.3", osCategory: "linux", userAgent: newUserAgent("3.16.3"), token });
+	const headers = buildZcodeHeaders({ appVersion: "3.16.3", userAgent: newUserAgent("3.16.3"), token });
 	assert.match(headers["user-agent"] ?? "", /^ZCode\/3\.16\.3 ai-sdk\/provider-utils/);
 	assert.equal(headers["x-zcode-app-version"], "3.16.3");
 	assert.equal(headers["x-zcode-agent"], "glm");
@@ -65,6 +69,20 @@ test("identity headers carry the captured wire shape", () => {
 	assert.equal(headers["anthropic-version"], "2023-06-01");
 	assert.match(headers["x-request-id"] ?? "", /^[0-9a-f-]{36}$/);
 	assert.match(headers["x-session-id"] ?? "", /^session_[0-9a-f-]{36}$/);
+});
+
+test("platform headers derive from the running platform, like the app", () => {
+	// App rule (zcode.cjs normalizeOsCategory / buildZCodeSourceHeadersFromContext).
+	assert.equal(normalizeOsCategory("darwin"), "macos");
+	assert.equal(normalizeOsCategory("win32"), "windows");
+	assert.equal(normalizeOsCategory("linux"), "linux");
+	assert.equal(normalizeOsCategory("freebsd"), "linux");
+
+	// x-platform is ${process.platform}-${process.arch}; osCategory defaults
+	// from the same platform when not passed.
+	const headers = buildZcodeHeaders({ appVersion: "3.16.3", userAgent: "ua", token: "t" });
+	assert.equal(headers["x-platform"], `${process.platform}-${process.arch}`);
+	assert.equal(headers["x-os-category"], normalizeOsCategory(process.platform));
 });
 
 test("model request headers match the app's captured order and completeness", () => {
@@ -120,7 +138,96 @@ test("a preset spec wins over the fallback for the same model", () => {
 	assert.equal(glm53?.contextWindow, 200_000);
 });
 
+test("transformRequestBody rewrites pi's adaptive thinking to the app's bare enabled, effort preserved", () => {
+	const body: Record<string, unknown> = {
+		model: "glm-5.3",
+		thinking: { type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "drop_block" } },
+		output_config: { effort: "max" },
+		messages: [{ role: "user", content: "hi" }],
+	};
+	const out = transformRequestBody(body, []);
+	assert.deepEqual(out.thinking, { type: "enabled" });
+	assert.deepEqual(out.output_config, { effort: "max" });
+	assert.deepEqual(out.messages, body.messages);
+	assert.deepEqual(body.thinking, { type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "drop_block" } }, "input must not be mutated");
+
+	// A stray budget path rewrites bare too (the gateway rejects budget_tokens).
+	const budgeted = transformRequestBody({ thinking: { type: "enabled", budget_tokens: 16384, display: "summarized" } }, []);
+	assert.deepEqual(budgeted.thinking, { type: "enabled" });
+
+	// pi never requests off (hidden); a stray disabled param drops instead of leaking —
+	// undefined-valued keys vanish at stringify, same wire as absent.
+	const dropped = transformRequestBody({ thinking: { type: "disabled" }, output_config: {} }, []);
+	assert.ok(!("thinking" in JSON.parse(JSON.stringify(dropped))));
+
+	// Non-thinking bodies pass through untouched.
+	const out2 = transformRequestBody({ messages: [] }, []);
+	assert.deepEqual(JSON.parse(JSON.stringify(out2)), { messages: [] });
+});
+
+test("transformRequestBody applies system relocation and thinking rules as one wire reshape", () => {
+	const preamble: SystemBlock[] = [{ type: "text", text: "app preamble" }];
+	const out = transformRequestBody(
+		{
+			system: [{ type: "text", text: "pi's system" }],
+			messages: [{ role: "user", content: "hi" }],
+			thinking: { type: "adaptive", display: "summarized" },
+			output_config: { effort: "high" },
+		},
+		preamble,
+	);
+	assert.deepEqual(out.system, preamble, "preamble stands alone at top level");
+	assert.deepEqual(out.messages, [
+		{ role: "system", content: [{ type: "text", text: "pi's system" }] },
+		{ role: "user", content: "hi" },
+	]);
+	assert.deepEqual(out.thinking, { type: "enabled" });
+});
+
 test("empty or missing presets fall back to the known start-plan pair", () => {
 	assert.deepEqual(startPlanModelConfigs(undefined).map((m) => m.id), ["glm-5.3-flash", "glm-5.3"]);
 	assert.deepEqual(startPlanModelConfigs({}).map((m) => m.id), ["glm-5.3-flash", "glm-5.3"]);
+});
+
+test("thinking levels match the app's effort variants: low, high, max via output_config", () => {
+	// Captured from the ZCode app and canonically published on models.dev:
+	// effort values [low, high, max], never budget_tokens. pi must take the
+	// effort path, not the budget path.
+	const configs = startPlanModelConfigs(undefined);
+	for (const model of configs) {
+		assert.equal(model.compat.forceAdaptiveThinking, true);
+		assert.equal(model.thinkingLevelMap?.off, null, "the plan exposes no off");
+	}
+	const glm53 = configs.find((m) => m.id === "glm-5.3");
+	assert.deepEqual(glm53?.thinkingLevelMap, {
+		off: null,
+		minimal: null,
+		low: "low",
+		medium: null,
+		high: "high",
+		xhigh: null,
+		max: "max",
+	});
+});
+
+test("effort variants map identity per pi-zen's buildThinkingLevelMap rule", () => {
+	assert.deepEqual(thinkingLevelMapFor({ reasoning: { enabled: true, variants: ["low", "max", "high"] } }), {
+		off: null,
+		minimal: null,
+		low: "low",
+		medium: null,
+		high: "high",
+		xhigh: null,
+		max: "max",
+	});
+	// Partial lists map identity and hide the rest — high never derives from max.
+	const partial = thinkingLevelMapFor({ reasoning: { enabled: true, variants: ["high", "max"] } });
+	assert.equal(partial.low, null);
+	assert.equal(partial.high, "high");
+	assert.equal(partial.max, "max");
+	// "none" means off where a plan actually allows disabling.
+	assert.equal(thinkingLevelMapFor({ reasoning: { enabled: true, variants: ["none", "low"] } }).off, "none");
+	// Unknown variant shapes fall back to the canonical trio instead of guessing.
+	assert.equal(thinkingLevelMapFor({ reasoning: { enabled: true, variants: ["enabled", "off"] } }).high, "high");
+	assert.equal(thinkingLevelMapFor(undefined).high, "high");
 });

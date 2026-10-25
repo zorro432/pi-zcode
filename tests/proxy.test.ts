@@ -1,8 +1,58 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { startZcodeTransformProxy } from "../proxy.ts";
 import { newUserAgent } from "../shared.ts";
+
+test("proxy reshapes pi's adaptive thinking to the app's bare enabled, effort kept", async () => {
+	let seenBody: { thinking?: unknown; output_config?: unknown } | undefined;
+	const upstream = createServer((req: IncomingMessage, res) => {
+		const chunks: Buffer[] = [];
+		req.on("data", (c: Buffer) => chunks.push(c));
+		req.on("end", () => {
+			seenBody = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+			res.writeHead(200, { "content-type": "application/json" });
+			res.end("{}");
+		});
+	});
+	await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+	const proxy = await startZcodeTransformProxy({
+		upstreamOrigin: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`,
+		appVersion: "3.16.3",
+		osCategory: "linux",
+		userAgent: newUserAgent("3.16.3"),
+		token: "test-jwt",
+	});
+	try {
+		const status = await new Promise<number | undefined>((resolve, reject) => {
+			const req = httpRequest(`http://127.0.0.1:${proxy.port}/v1/messages`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+			}, (res) => {
+				res.on("data", () => {});
+				res.on("end", () => resolve(res.statusCode));
+			});
+			req.on("error", reject);
+			// pi's effort-path wire shape (adapter-verified).
+			req.end(JSON.stringify({
+				model: "glm-5.3",
+				max_tokens: 16,
+				thinking: { type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "drop_block" } },
+				output_config: { effort: "max" },
+				messages: [{ role: "user", content: "hi" }],
+			}));
+		});
+		assert.equal(status, 200);
+		assert.deepEqual(seenBody?.thinking, { type: "enabled" }, "must match the app's captured shape");
+		assert.deepEqual(seenBody?.output_config, { effort: "max" }, "effort must survive untouched");
+	} finally {
+		proxy.close();
+		await new Promise<void>((resolve, reject) => upstream.close((err) => (err ? reject(err) : resolve())));
+	}
+});
 
 test("proxy forwards to the app's shape end-to-end", async () => {
 	// Upstream origin includes a path prefix, like /api/v1/zcode-plan/anthropic —
@@ -73,14 +123,13 @@ test("proxy forwards to the app's shape end-to-end", async () => {
 	}
 });
 
-test("proxy injects the ZCode system preamble into pi requests", async () => {
-	let seenSystem: unknown = undefined;
+test("proxy keeps the ZCode preamble top-level and relocates pi's system into messages", async () => {
+	let seenBody: { system?: unknown; messages?: Array<{ role: string; content: unknown }> } | undefined;
 	const upstream = createServer((req: IncomingMessage, res) => {
 		const chunks: Buffer[] = [];
 		req.on("data", (c: Buffer) => chunks.push(c));
 		req.on("end", () => {
-			const parsed = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
-			seenSystem = parsed.system;
+			seenBody = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end("{}");
 		});
@@ -94,6 +143,7 @@ test("proxy injects the ZCode system preamble into pi requests", async () => {
 		osCategory: "linux",
 		userAgent: newUserAgent("3.16.3"),
 		token: "test-jwt",
+		sessionId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 	});
 
 	try {
@@ -115,10 +165,22 @@ test("proxy injects the ZCode system preamble into pi requests", async () => {
 			}));
 		});
 		assert.equal(status, 200);
-		assert.ok(Array.isArray(seenSystem) && seenSystem.length === 3, "preamble two blocks + pi block");
-		assert.match((seenSystem as { text: string }[])[0]?.text ?? "", /You are ZCode/);
-		assert.match((seenSystem as { text: string }[])[1]?.text ?? "", /You are an interactive ZCode agent/);
-		assert.equal((seenSystem as { text: string }[])[2]?.text, "pi's own system prompt");
+		const seenSystem = seenBody?.system as { text: string }[] | undefined;
+		assert.ok(Array.isArray(seenSystem) && seenSystem.length === 2, "top-level system is the app preamble only");
+		assert.match(seenSystem[0]?.text ?? "", /You are ZCode/);
+		assert.match(seenSystem[1]?.text ?? "", /You are an interactive ZCode agent/);
+		// The captured preamble's machine-specific path is a placeholder in the
+		// shipped file; the wire must carry this machine's session-local dir.
+		const preambleText = seenSystem.map((b) => b.text).join("\n");
+		assert.ok(!preambleText.includes("{{ZCODE_VISUALIZATION_DIR}}"), "placeholder must be interpolated");
+		const preambleFile = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "wire-preamble.json"), "utf-8");
+		assert.ok(!preambleFile.includes("/home/"), "shipped preamble must carry no machine path");
+		assert.match(preambleText, /visualizations\/aaaaaaaabbbbccccddddeeeeeeeeeeee/, "session-local vis dir present");
+		const messages = seenBody?.messages ?? [];
+		assert.equal(messages[0]?.role, "system");
+		const relocated = messages[0]?.content as { text: string }[];
+		assert.equal(relocated[0]?.text, "pi's own system prompt");
+		assert.equal(messages[1]?.role, "user");
 	} finally {
 		proxy.close();
 		await new Promise<void>((resolve, reject) => upstream.close((err) => (err ? reject(err) : resolve())));
