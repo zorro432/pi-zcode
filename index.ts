@@ -40,7 +40,7 @@ function resolveBaseUrl(config: ZcodeConfigFile | null): string {
 		|| "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
 }
 
-export default function activate(pi: ExtensionAPI) {
+export default async function activate(pi: ExtensionAPI) {
 	const sessionId = crypto.randomUUID();
 	let proxy: TransformProxy | null = null;
 	// Notices raised before a session context exists flush through ctx.ui.notify
@@ -71,7 +71,7 @@ export default function activate(pi: ExtensionAPI) {
 		return `http://127.0.0.1:${proxy.port}`;
 	}
 
-	function register(): number {
+	async function register(): Promise<number> {
 		const config = readJson<ZcodeConfigFile>(CONFIG_FILE);
 		const creds = readJson<ZcodeCredentialsFile>(CREDENTIALS_FILE);
 		const token = resolveZcodeToken(config, creds)?.token;
@@ -80,21 +80,22 @@ export default function activate(pi: ExtensionAPI) {
 		const models = startPlanModelConfigs(config?.provider?.[START_PLAN_PRESET_KEY]?.models);
 		const upstreamOrigin = resolveBaseUrl(config);
 
-		ensureProxy(token, upstreamOrigin)
-			.then((baseUrl) => {
-				dbg(`transform proxy on ${baseUrl} -> ${upstreamOrigin}`);
-				registerProviderFor(pi, baseUrl, token, models);
-			})
-			.catch(() => {
-				// No local proxy (port bind failure?) — direct may trip the WAF,
-				// but a broken provider beats a missing one.
-				notice("transform proxy unavailable, using direct endpoint (may hit the WAF)");
-				registerProviderFor(pi, upstreamOrigin, token, models);
-			});
+		try {
+			const baseUrl = await ensureProxy(token, upstreamOrigin);
+			dbg(`transform proxy on ${baseUrl} -> ${upstreamOrigin}`);
+			registerProviderFor(pi, baseUrl, token, models);
+		} catch {
+			// No local proxy (port bind failure?) — direct may trip the WAF,
+			// but a broken provider beats a missing one.
+			notice("transform proxy unavailable, using direct endpoint (may hit the WAF)");
+			registerProviderFor(pi, upstreamOrigin, token, models);
+		}
 		return models.length;
 	}
 
-	const registered = register();
+	// Awaited: pi waits for async factories before startup model selection,
+	// so headless `pi -p --model zcode/...` sees the provider.
+	const registered = await register();
 
 	process.on("exit", () => proxy?.close());
 
