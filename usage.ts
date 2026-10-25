@@ -112,16 +112,50 @@ export function parseZcodeBalance(payload: unknown): ZcodeUsageWindow[] {
 			if (id && name) planNames.set(id, name);
 		}
 	}
+	// An account's plans stack: the gateway draws each model's usage from the
+	// highest-priority bucket that still has units (plan_priority on the
+	// bucket), falling to the next plan when one empties. Report only that
+	// effective bucket per model capability — an exhausted trial bucket must
+	// not read "limited" while a funded higher-priority plan covers the model.
+	// Buckets without capabilities can't be ordered against anything, so they
+	// always report.
+	const prioOf = (b: Record<string, unknown>): number =>
+		typeof b.plan_priority === "number" ? b.plan_priority
+		: typeof b.priority === "number" ? b.priority
+		: 0;
+	const capOf = (b: Record<string, unknown>, index: number): string => {
+		const caps = b.capabilities;
+		const cap = Array.isArray(caps) && typeof caps[0] === "string" ? caps[0] : undefined;
+		return cap ?? `bucket:${typeof b.bucket_id === "string" ? b.bucket_id : index}`;
+	};
+	const remainingOf = (b: Record<string, unknown>): number =>
+		typeof b.remaining_units === "number" ? b.remaining_units : 0;
+	const active = new Set<Record<string, unknown>>();
+	const groups = new Map<string, Record<string, unknown>[]>();
+	balances.forEach((raw, index) => {
+		const bucket = asRecord(raw);
+		if (!bucket) return;
+		const cap = capOf(bucket, index);
+		const group = groups.get(cap);
+		if (group) group.push(bucket);
+		else groups.set(cap, [bucket]);
+	});
+	for (const group of groups.values()) {
+		const sorted = group.slice().sort((a, b) => prioOf(b) - prioOf(a));
+		const top = sorted[0];
+		if (top) active.add(sorted.find((b) => remainingOf(b) > 0) ?? top);
+	}
+
 	const distinctPlans = new Set(
-		balances
-			.map((b) => asRecord(b))
-			.map((b) => (typeof b?.plan_id === "string" ? b.plan_id : undefined))
+		[...active]
+			.map((b) => (typeof b.plan_id === "string" ? b.plan_id : undefined))
 			.filter((id): id is string => !!id),
 	).size;
+
 	const windows: ZcodeUsageWindow[] = [];
 	for (const raw of balances) {
 		const bucket = asRecord(raw);
-		if (!bucket) continue;
+		if (!bucket || !active.has(bucket)) continue;
 		const total = typeof bucket.total_units === "number" ? bucket.total_units : undefined;
 		const used = typeof bucket.used_units === "number" ? bucket.used_units : undefined;
 		const remaining = typeof bucket.remaining_units === "number" ? bucket.remaining_units : undefined;
