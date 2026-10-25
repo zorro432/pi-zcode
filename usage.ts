@@ -180,6 +180,8 @@ export function parseZcodeBalance(payload: unknown): ZcodeUsageWindow[] {
 
 export async function fetchZcodeUsage(): Promise<
 	| { state: "ready"; windows: ZcodeUsageWindow[]; note: string; source: string; updatedAt: Date }
+	| { state: "unconfigured"; message: string; setupHint?: string }
+	| { state: "expired"; message: string; reauthHint?: string }
 	| { state: "error"; message: string; authHint?: string }
 > {
 	const config = readJson<ZcodeConfigFile>(CONFIG_FILE);
@@ -187,9 +189,9 @@ export async function fetchZcodeUsage(): Promise<
 	const auth = resolveZcodeToken(config, creds);
 	if (!auth) {
 		return {
-			state: "error",
-			message: "No ZCode start-plan token found.",
-			authHint: "Log in to the ZCode desktop app once (~/.zcode/v2/), then restart this session.",
+			state: "unconfigured",
+			message: "ZCode is not configured on this machine.",
+			setupHint: "Log in to the ZCode desktop app once (~/.zcode/v2/), then restart this session.",
 		};
 	}
 
@@ -231,9 +233,9 @@ export async function fetchZcodeUsage(): Promise<
 
 	if (response.status === 401 || response.status === 403) {
 		return {
-			state: "error",
+			state: "expired",
 			message: `ZCode rejected the token (${response.status}).`,
-			authHint: "The JWT rotates on desktop-app re-login — open ZCode once, then retry.",
+			reauthHint: "The JWT rotates on desktop-app re-login — open ZCode once, then retry.",
 		};
 	}
 	if (response.status < 200 || response.status >= 300) {
