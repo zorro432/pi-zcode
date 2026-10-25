@@ -191,7 +191,7 @@ export async function fetchZcodeUsage(): Promise<
 		return {
 			state: "unconfigured",
 			message: "ZCode is not configured on this machine.",
-			setupHint: "Log in to the ZCode desktop app once (~/.zcode/v2/), then restart this session.",
+			setupHint: "Fix: log in to the ZCode desktop app once (~/.zcode/v2/), then restart this session.",
 		};
 	}
 
@@ -234,8 +234,8 @@ export async function fetchZcodeUsage(): Promise<
 	if (response.status === 401 || response.status === 403) {
 		return {
 			state: "expired",
-			message: `ZCode rejected the token (${response.status}).`,
-			reauthHint: "The JWT rotates on desktop-app re-login — open ZCode once, then retry.",
+			message: `ZCode token rejected (${response.status}).`,
+			reauthHint: "Fix: open the ZCode desktop app once to rotate the JWT, then retry.",
 		};
 	}
 	if (response.status < 200 || response.status >= 300) {
