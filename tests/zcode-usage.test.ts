@@ -80,3 +80,39 @@ test("formatTokens: humanized buckets", () => {
 	assert.equal(formatTokens(1_200_000_000), "1.2B");
 	assert.equal(formatTokens(9000), "9K");
 });
+
+test("parseZcodeBalance: multi-plan accounts get plan-prefixed labels, single-plan stays short", () => {
+	// Real shape: trial + "1024 Dev Day" both expose GLM-5.3 buckets; without
+	// plan attribution the meter renders indistinguishable duplicate rows.
+	const twoPlans = {
+		code: 0,
+		data: {
+			plans: [
+				{ plan_id: "zcode-v3-start-plan", name: "ZCode Start Plan", status: "active" },
+				{ plan_id: "zcode-v3-start-plan-1024", name: "ZCode 1024 Dev Day", status: "active" },
+			],
+			balances: [
+				{ plan_id: "zcode-v3-start-plan", show_name: "GLM-5.3", total_units: 10_000_000, used_units: 9_000_000, remaining_units: 1_000_000, expires_at: 1792976400 },
+				{ plan_id: "zcode-v3-start-plan-1024", show_name: "GLM-5.3", total_units: 200_000_000, used_units: 19_000_000, remaining_units: 181_000_000, expires_at: 1792976400 },
+			],
+		},
+	};
+	const windows = parseZcodeBalance(twoPlans);
+	assert.equal(windows.length, 2);
+	assert.deepEqual(windows.map((w) => w.label), ["Start Plan · GLM-5.3", "1024 Dev Day · GLM-5.3"]);
+	assert.equal(windows[0]?.usedPercent, 90);
+	assert.equal(windows[1]?.usedPercent, 9.5);
+
+	// One plan: buckets keep their bare model labels.
+	const onePlan = {
+		code: 0,
+		data: {
+			plans: [{ plan_id: "zcode-v3-start-plan-1024", name: "ZCode 1024 Dev Day", status: "active" }],
+			balances: [
+				{ plan_id: "zcode-v3-start-plan-1024", show_name: "GLM-5.3-Flash", total_units: 300_000_000, used_units: 21_000_000, remaining_units: 279_000_000, expires_at: 1792976400 },
+			],
+		},
+	};
+	const single = parseZcodeBalance(onePlan);
+	assert.deepEqual(single.map((w) => w.label), ["GLM-5.3-Flash"]);
+});

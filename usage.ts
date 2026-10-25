@@ -96,9 +96,28 @@ export function formatTokens(value: number): string {
 
 /** One usage window per token bucket; buckets with no total are skipped. */
 export function parseZcodeBalance(payload: unknown): ZcodeUsageWindow[] {
-	// Envelope: { code, msg, data: { balances: [...] } }.
+	// Envelope: { code, msg, data: { plans: [...], balances: [...] } }.
 	const data = asRecord(asRecord(payload)?.data);
 	const balances = Array.isArray(data?.balances) ? data.balances : [];
+	// plans[] carries display names keyed by plan_id. An account can hold
+	// several active plans (e.g. a trial plus a "1024 Dev Day") whose buckets
+	// repeat the same model show_names — prefix the plan name only when that's
+	// the case, so the common single-plan meter keeps its short labels.
+	const planNames = new Map<string, string>();
+	if (Array.isArray(data?.plans)) {
+		for (const raw of data.plans) {
+			const plan = asRecord(raw);
+			const id = typeof plan?.plan_id === "string" ? plan.plan_id : undefined;
+			const name = typeof plan?.name === "string" ? plan.name.replace(/^ZCode\s+/i, "").trim() : "";
+			if (id && name) planNames.set(id, name);
+		}
+	}
+	const distinctPlans = new Set(
+		balances
+			.map((b) => asRecord(b))
+			.map((b) => (typeof b?.plan_id === "string" ? b.plan_id : undefined))
+			.filter((id): id is string => !!id),
+	).size;
 	const windows: ZcodeUsageWindow[] = [];
 	for (const raw of balances) {
 		const bucket = asRecord(raw);
@@ -107,7 +126,9 @@ export function parseZcodeBalance(payload: unknown): ZcodeUsageWindow[] {
 		const used = typeof bucket.used_units === "number" ? bucket.used_units : undefined;
 		const remaining = typeof bucket.remaining_units === "number" ? bucket.remaining_units : undefined;
 		if (total === undefined || total <= 0 || used === undefined) continue;
-		const label = typeof bucket.show_name === "string" && bucket.show_name.trim() ? bucket.show_name.trim() : "tokens";
+		const showName = typeof bucket.show_name === "string" && bucket.show_name.trim() ? bucket.show_name.trim() : "tokens";
+		const planName = distinctPlans > 1 && typeof bucket.plan_id === "string" ? planNames.get(bucket.plan_id) : undefined;
+		const label = planName ? `${planName} · ${showName}` : showName;
 		const expiresAt = typeof bucket.expires_at === "number" ? new Date(bucket.expires_at * 1000) : undefined;
 		// "limited" is the meter's contract for an exhausted window — same word
 		// the OpenCode Go provider uses, so error coloring and hints trigger.
