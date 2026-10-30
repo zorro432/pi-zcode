@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatTokens, parseZcodeBalance } from "../usage.ts";
+import { formatTokens, parseEntitledModels, parseZcodeBalance } from "../usage.ts";
 
 // Fixtures mirror the real billing/balance envelope (captured from the
 // desktop app via mitmproxy): { code, msg, data: { balances: [...] } }.
@@ -135,4 +135,23 @@ test("parseZcodeBalance: reports the effective bucket per model when plans stack
 	// Only the highest-priority plan's buckets display, so labels stay short.
 	assert.deepEqual(limited.map((w) => w.label), ["GLM-5.3-Flash", "GLM-5.3"]);
 	assert.ok(limited.every((w) => w.statusLabel === "limited"));
+});
+
+test("parseEntitledModels: model: capabilities, lowercased; exhausted buckets still count", () => {
+	const ids = parseEntitledModels({
+		data: {
+			balances: [
+				{ capabilities: ["model:GLM-5.3"], total_units: 1, used_units: 1, remaining_units: 0 },
+				{ capabilities: ["model:glm-5.3-flash", "feature:web-search"], total_units: 1, used_units: 0 },
+				{ show_name: "no capabilities" },
+				null,
+			],
+		},
+	});
+	assert.deepEqual([...ids].sort(), ["glm-5.3", "glm-5.3-flash"]);
+});
+
+test("parseEntitledModels: malformed payloads yield an empty set", () => {
+	assert.deepEqual([...parseEntitledModels(null)], []);
+	assert.deepEqual([...parseEntitledModels({ data: { balances: "nope" } })], []);
 });

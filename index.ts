@@ -1,10 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { release } from "node:os";
 import { startZcodeTransformProxy, type TransformProxy } from "./proxy.ts";
-import { resolveZcodeToken, registerZcodeUsageProvider } from "./usage.ts";
+import { fetchZcodeEntitledModels, resolveZcodeToken, registerZcodeUsageProvider } from "./usage.ts";
 import { APP_VERSION, CONFIG_FILE, CREDENTIALS_FILE, readJson, START_PLAN_PRESET_KEY } from "./data-files.ts";
 import {
 	buildZcodeHeaders,
+	filterToEntitled,
 	normalizeOsCategory,
 	newUserAgent,
 	startPlanModelConfigs,
@@ -77,20 +78,34 @@ export default async function activate(pi: ExtensionAPI) {
 		const token = resolveZcodeToken(config, creds)?.token;
 		if (!token) return 0;
 
-		const models = startPlanModelConfigs(config?.provider?.[START_PLAN_PRESET_KEY]?.models);
+		const candidates = startPlanModelConfigs(config?.provider?.[START_PLAN_PRESET_KEY]?.models);
 		const upstreamOrigin = resolveBaseUrl(config);
 
 		try {
-			const baseUrl = await ensureProxy(token, upstreamOrigin);
+			const [baseUrl, entitled] = await Promise.all([
+				ensureProxy(token, upstreamOrigin),
+				// Fails silent (null): an unreachable balance endpoint must not
+				// hide the provider, only skip the plan-coverage filter.
+				fetchZcodeEntitledModels(),
+			]);
+			const models = filterToEntitled(candidates, entitled);
+			if (models.length < candidates.length) {
+				const hidden = candidates
+					.filter((m) => !models.includes(m))
+					.map((m) => m.id)
+					.join(", ");
+				notice(`plan no longer covers ${hidden} — hidden from /model`);
+			}
 			dbg(`transform proxy on ${baseUrl} -> ${upstreamOrigin}`);
 			registerProviderFor(pi, baseUrl, token, models);
+			return models.length;
 		} catch {
 			// No local proxy (port bind failure?) — direct may trip the WAF,
 			// but a broken provider beats a missing one.
 			notice("transform proxy unavailable, using direct endpoint (may hit the WAF)");
-			registerProviderFor(pi, upstreamOrigin, token, models);
+			registerProviderFor(pi, upstreamOrigin, token, candidates);
+			return candidates.length;
 		}
-		return models.length;
 	}
 
 	// Awaited: pi waits for async factories before startup model selection,

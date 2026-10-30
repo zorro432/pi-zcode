@@ -6,6 +6,7 @@ import {
 	buildZcodeHeaders,
 	decryptCredentialEnvelope,
 	deriveCredentialSecret,
+	filterToEntitled,
 	newUserAgent,
 	normalizeOsCategory,
 	startPlanModelConfigs,
@@ -230,4 +231,21 @@ test("effort variants map identity per pi-zen's buildThinkingLevelMap rule", () 
 	// Unknown variant shapes fall back to the canonical trio instead of guessing.
 	assert.equal(thinkingLevelMapFor({ reasoning: { enabled: true, variants: ["enabled", "off"] } }).high, "high");
 	assert.equal(thinkingLevelMapFor(undefined).high, "high");
+});
+
+test("filterToEntitled: null or empty entitlement keeps every model", () => {
+	const configs = startPlanModelConfigs(undefined);
+	assert.equal(filterToEntitled(configs, null), configs);
+	assert.equal(filterToEntitled(configs, new Set()), configs);
+});
+
+test("filterToEntitled: entitlement set is ground truth over the preset cache", () => {
+	const configs = startPlanModelConfigs(undefined);
+	const kept = filterToEntitled(configs, new Set(["glm-5.3", "model-noise"]));
+	assert.deepEqual(kept.map((m) => m.id), ["glm-5.3"]);
+});
+
+test("filterToEntitled: empty match falls back to all models", () => {
+	const configs = startPlanModelConfigs(undefined);
+	assert.equal(filterToEntitled(configs, new Set(["some-other-model"])), configs);
 });

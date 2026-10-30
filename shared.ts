@@ -410,3 +410,21 @@ export function startPlanModelConfigs(
 		compat: { forceAdaptiveThinking: true },
 	}));
 }
+
+/**
+ * Keep only models the plan's token buckets actually entitle (see
+ * parseEntitledModels). The fallbacks exist for degraded data, not for
+ * second-guessing the plan: null (couldn't ask) and an empty match (asked
+ * but nothing lined up — transient or partial payload) both keep every
+ * model, because a provider with zero models is harder to diagnose than a
+ * 403 naming the real problem. A non-empty entitlement set is ground truth
+ * and wins over the preset cache, which can lag the plan.
+ */
+export function filterToEntitled(
+	models: ZcodeModelConfig[],
+	entitled: Set<string> | null,
+): ZcodeModelConfig[] {
+	if (!entitled || entitled.size === 0) return models;
+	const covered = models.filter((m) => entitled.has(m.id));
+	return covered.length > 0 ? covered : models;
+}

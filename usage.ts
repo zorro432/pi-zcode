@@ -42,6 +42,10 @@ export interface ZcodeUsageWindow {
 const CREDENTIAL_JWT_KEY = "zcodejwttoken";
 const BALANCE_URL = "https://zcode.z.ai/api/v1/zcode-plan/billing/balance";
 const REQUEST_TIMEOUT_MS = 15_000;
+// The entitlement preflight runs inside pi's awaited extension factory, so it
+// must not stall startup: a short timeout that falls back to "register all"
+// beats a slow but complete one.
+const ENTITLEMENTS_TIMEOUT_MS = 5_000;
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -178,22 +182,18 @@ export function parseZcodeBalance(payload: unknown): ZcodeUsageWindow[] {
 
 // ─── Fetch ───────────────────────────────────────────────────────────────────
 
-export async function fetchZcodeUsage(): Promise<
-	| { state: "ready"; windows: ZcodeUsageWindow[]; note: string; source: string; updatedAt: Date }
-	| { state: "unconfigured"; message: string; setupHint?: string }
-	| { state: "expired"; message: string; reauthHint?: string }
-	| { state: "error"; message: string; authHint?: string }
-> {
+interface BalanceContext {
+	auth: ZcodeTokenResolution;
+	headers: Record<string, string>;
+	url: URL;
+}
+
+/** Token + app-shaped headers + URL for the billing/balance call, or null when unconfigured. */
+function balanceContext(): BalanceContext | null {
 	const config = readJson<ZcodeConfigFile>(CONFIG_FILE);
 	const creds = readJson<ZcodeCredentialsFile>(CREDENTIALS_FILE);
 	const auth = resolveZcodeToken(config, creds);
-	if (!auth) {
-		return {
-			state: "unconfigured",
-			message: "ZCode is not configured on this machine.",
-			setupHint: "Fix: log in to the ZCode desktop app once (~/.zcode/v2/), then restart this session.",
-		};
-	}
+	if (!auth) return null;
 
 	const telemetry = readJson<{ deviceMid?: string }>(TELEMETRY_FILE);
 	const headers = buildZcodeHeaders({
@@ -216,29 +216,55 @@ export async function fetchZcodeUsage(): Promise<
 
 	const url = new URL(BALANCE_URL);
 	url.searchParams.set("app_version", APP_VERSION);
+	return { auth, headers: balanceHeaders, url };
+}
 
+async function balanceRequest(ctx: BalanceContext, timeoutMs: number): Promise<{ status: number; body: string }> {
 	let response: Response;
 	try {
-		response = await fetch(url, {
+		response = await fetch(ctx.url, {
 			method: "GET",
-			headers: balanceHeaders,
-			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+			headers: ctx.headers,
+			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		return { state: "error", message: `ZCode balance request failed: ${message}` };
+		throw new Error(`ZCode balance request failed: ${message}`);
+	}
+	return { status: response.status, body: await response.text() };
+}
+
+export async function fetchZcodeUsage(): Promise<
+	| { state: "ready"; windows: ZcodeUsageWindow[]; note: string; source: string; updatedAt: Date }
+	| { state: "unconfigured"; message: string; setupHint?: string }
+	| { state: "expired"; message: string; reauthHint?: string }
+	| { state: "error"; message: string; authHint?: string }
+> {
+	const ctx = balanceContext();
+	if (!ctx) {
+		return {
+			state: "unconfigured",
+			message: "ZCode is not configured on this machine.",
+			setupHint: "Fix: log in to the ZCode desktop app once (~/.zcode/v2/), then restart this session.",
+		};
 	}
 
-	const body = await response.text();
+	let status: number;
+	let body: string;
+	try {
+		({ status, body } = await balanceRequest(ctx, REQUEST_TIMEOUT_MS));
+	} catch (error) {
+		return { state: "error", message: error instanceof Error ? error.message : String(error) };
+	}
 
-	if (response.status === 401 || response.status === 403) {
+	if (status === 401 || status === 403) {
 		return {
 			state: "expired",
-			message: `ZCode token rejected (${response.status}).`,
+			message: `ZCode token rejected (${status}).`,
 			reauthHint: "Fix: open the ZCode desktop app once to rotate the JWT, then retry.",
 		};
 	}
-	if (response.status < 200 || response.status >= 300) {
+	if (status < 200 || status >= 300) {
 		let detail = body.replace(/\s+/g, " ").trim().slice(0, 160);
 		try {
 			const parsed = JSON.parse(body) as { code?: unknown; msg?: unknown };
@@ -246,7 +272,7 @@ export async function fetchZcodeUsage(): Promise<
 		} catch {
 			// keep raw snippet
 		}
-		return { state: "error", message: `ZCode balance request failed (${response.status}). ${detail}`.trim() };
+		return { state: "error", message: `ZCode balance request failed (${status}). ${detail}`.trim() };
 	}
 
 	let parsed: unknown;
@@ -265,9 +291,49 @@ export async function fetchZcodeUsage(): Promise<
 		state: "ready",
 		windows,
 		updatedAt: new Date(),
-		source: auth.source,
+		source: ctx.auth.source,
 		note: "official GET zcode.z.ai/api/v1/zcode-plan/billing/balance · start-plan token buckets",
 	};
+}
+
+// ─── Entitlements ──────────────────────────────────────────────────────
+
+/**
+ * Which models the active plans actually meter, lowercased, from the same
+ * balance payload's `capabilities: ["model:glm-5.3", ...]`. An exhausted
+ * bucket still counts — entitlement is about the plan, not remaining units.
+ */
+export function parseEntitledModels(payload: unknown): Set<string> {
+	const data = asRecord(asRecord(payload)?.data);
+	const balances = Array.isArray(data?.balances) ? data.balances : [];
+	const ids = new Set<string>();
+	for (const raw of balances) {
+		const capabilities = asRecord(raw)?.capabilities;
+		if (!Array.isArray(capabilities)) continue;
+		for (const cap of capabilities) {
+			if (typeof cap === "string" && cap.startsWith("model:")) {
+				ids.add(cap.slice("model:".length).toLowerCase());
+			}
+		}
+	}
+	return ids;
+}
+
+/**
+ * Entitled model ids for the current token, or null when they cannot be
+ * determined (unconfigured, network failure, non-2xx, bad JSON). Null is the
+ * caller's cue to keep whatever models it would otherwise register.
+ */
+export async function fetchZcodeEntitledModels(): Promise<Set<string> | null> {
+	const ctx = balanceContext();
+	if (!ctx) return null;
+	try {
+		const { status, body } = await balanceRequest(ctx, ENTITLEMENTS_TIMEOUT_MS);
+		if (status < 200 || status >= 300) return null;
+		return parseEntitledModels(JSON.parse(body));
+	} catch {
+		return null;
+	}
 }
 
 // ─── Registry plug-in ────────────────────────────────────────────────────────

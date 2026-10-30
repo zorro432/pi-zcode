@@ -15,6 +15,7 @@ pi install git:github.com/zorro432/pi-zcode
 
 - **No keys to manage** — the plugin reads the app's own config and encrypted credentials, re-reading them at every session start.
 - **1M-context GLM** — `glm-5.3` (text) and `glm-5.3-flash` (text + image), metered against the plan's token buckets, so cost shows as zero.
+- **Plan-accurate model list** — models the plan no longer covers (per the billing endpoint's entitlements) are hidden from `/model` instead of failing on first use; if the endpoint can't be reached, everything shows as before.
 - **Reasoning levels that stick** — pi's thinking levels map to the plan's low / high / max efforts, the same mapping the desktop app uses.
 - **A usage meter** — one bar per entitled model: percent of the bucket used, tokens remaining, plan end date. Requires a compatible usage meter installed; without one, this tab doesn't exist.
 
